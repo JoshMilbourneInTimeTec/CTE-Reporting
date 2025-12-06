@@ -10,13 +10,25 @@ CTE Reporting is a SQL Server data warehouse project for Career and Technical Ed
 
 ```
 CTE Reporting/
-├── sql/                    # SQL Server DDL and schema definitions
-│   └── 02_create_dim_date.sql    # Time dimension table creation (2000-2040)
-├── scripts/               # Python utility scripts
-│   └── populate_dim_date.py      # Populates dim_date table with calendar/holiday attributes
-├── Regions.txt            # Master data: Idaho regions mapped to counties and FIPS codes
-├── .env                   # Database connection configuration (DO NOT COMMIT)
-└── .gitignore            # Standard Visual Studio + environment-specific ignores
+├── sql/
+│   ├── 02_create_dim_date.sql               # Time dimension (2000-2040)
+│   ├── 03_create_dim_cluster.sql            # Cluster dimension (17 rows)
+│   ├── 03_load_dim_cluster.sql              # Load cluster dimension
+│   ├── 04_create_dim_pathway.sql            # Pathway dimension (117 rows)
+│   ├── 04_load_dim_pathway.sql              # Load pathway dimension
+│   ├── 05_create_dim_specialty.sql          # Specialty dimension (112 rows)
+│   ├── 05_load_dim_specialty.sql            # Load specialty dimension
+│   ├── 06_alter_dim_badge_add_specialty_fk.sql  # Add FK constraint
+│   ├── 07_create_dim_institution.sql        # Institution dimension (12 rows)
+│   ├── 07_load_dim_institution.sql          # Load institution dimension
+│   ├── 08_load_dim_user.sql                 # Load user dimension with Phase 2 enhancements
+│   └── phase1_validation.sql                # Phase 1 validation tests
+├── scripts/                                  # Python utility scripts
+│   └── populate_dim_date.py                 # Populate dim_date table
+├── PHASE_2_ENHANCEMENTS.md                  # Phase 2 roadmap and implementation status
+├── Regions.txt                              # Idaho regions → counties → FIPS codes mapping
+├── .env                                     # Database connection config (DO NOT COMMIT)
+└── .gitignore                               # Git ignore patterns
 ```
 
 ## Architecture
@@ -32,7 +44,31 @@ CTE Reporting/
   - Includes both calendar and ISO week numbers for reporting flexibility
   - Federal holidays (11 total) + Idaho state holidays (2 additional: Human Rights Day, Idaho Day)
 
-**Regional Hierarchy**
+**Career/Technical Education Hierarchy (Phase 1 Complete)**
+- **Cluster Dimension (dim_cluster)**: 17 CTE career clusters
+  - Grain: One row per cluster with SCD Type 2 tracking
+  - Attributes: cluster_id, cluster_name, cluster_code (4-char abbreviation), description
+  - Examples: AGRI (Agriculture), ARCH (Architecture), ARTS (Arts), etc.
+
+- **Pathway Dimension (dim_pathway)**: 117 career pathways
+  - Grain: One row per pathway with SCD Type 2 tracking
+  - Foreign Keys: cluster_key (maps to dim_cluster)
+  - Attributes: pathway_id, pathway_name, pathway_code (4-char), description, icon_url
+  - Phase 1 Achievement: 100% cluster mapping, 100% icon URLs populated
+
+- **Specialty Dimension (dim_specialty)**: 112 specialties
+  - Grain: One row per specialty with SCD Type 2 tracking
+  - Foreign Keys: pathway_key (maps to dim_pathway)
+  - Phase 2 Enhancements: required_badge_count, required_skill_count
+  - Attributes: specialty_id, specialty_name, pathway_key, icon_url
+  - Phase 2 Achievement: 100% badge counts, 100% skill counts calculated
+
+- **Institution Dimension (dim_institution)**: 12 educational institutions
+  - Grain: One row per institution (independent)
+  - Attributes: institution_id, institution_name, institution_code, website_url
+  - Note: Address and region data deferred to Phase 2+ (requires external sources)
+
+**Regional Hierarchy (Supplementary)**
 - Mapped in Regions.txt: 6 Idaho regions → 44 counties → FIPS codes
 - Used for geographic analysis and reporting segmentation
 - Region numbering: 1=Northern Idaho, 2=North Central, 3=Southwestern Idaho, 4=Southeastern Idaho, 5=South Central Idaho, 6=Eastern Idaho
@@ -119,11 +155,56 @@ The YYYYMMDD integer format (e.g., 20240115):
 - **Storage-efficient**: 4-byte INT vs 8-byte DATETIME for DW scale
 - **Query-friendly**: No type conversion overhead when filtering by date
 
+## Phase 2 Enhancements (Complete)
+
+### Data Quality Metrics
+- **dim_specialty.required_badge_count**: Counts distinct badges per specialty (100% coverage, range 0-56)
+- **dim_specialty.required_skill_count**: Counts distinct skills per specialty (100% coverage, range 0-50)
+
+### User Demographic Classification
+- **dim_user.user_type**: Derived from IsHighSchool flag (100% coverage: 99.8% High School, 0.2% Post-Secondary)
+
+### Dimension Codes
+- **dim_cluster.cluster_code**: 4-character abbreviations (100% coverage: AGRI, ARCH, ARTS, BUSI, EDUC, etc.)
+- **dim_pathway.pathway_code**: 4-character codes (100% coverage: FOOD, ANIM, CONS, TELE, TEAC, etc.)
+
+See [PHASE_2_ENHANCEMENTS.md](PHASE_2_ENHANCEMENTS.md) for complete roadmap and priority matrix.
+
+## Dimensional Model Design Patterns
+
+### SCD Type 2 Implementation
+All dimensions follow Slowly Changing Dimension Type 2:
+- **Surrogate Keys**: IDENTITY(0,1) starting at 0
+- **Unknown Row**: Every dimension has a key=0 row for NULL/unmapped values
+- **Natural Keys**: Business identifiers (cluster_id, pathway_id, etc.)
+- **Change Tracking**: is_current flag (1=current, 0=historical)
+- **Effective Dating**: effective_date, expiration_date columns
+- **Audit Fields**: dw_created_date, dw_updated_date
+
+### MERGE-Based Loading
+All load procedures use MERGE statement pattern:
+- **Deduplication**: ROW_NUMBER() OVER (PARTITION BY natural_key ORDER BY ModifiedDate DESC)
+- **Change Detection**: Comprehensive OR conditions on all attributes
+- **Three Actions**:
+  - INSERT: New records from staging
+  - UPDATE: Changed records (marks old as is_current=0)
+  - MARK DELETED: Inactive records
+- **Error Handling**: Try/catch with job_execution_log insertion
+- **Debug Mode**: @DebugMode parameter for PRINT statements
+
+### Indexing Strategy
+- **Clustered**: Primary key on surrogate key
+- **Unique Nonclustered**: Natural key + is_current filter for SCD lookups
+- **Foreign Key Indexes**: Nonclustered on FK columns
+- **Filter Indexes**: WHERE is_current = 1 for common queries
+
 ## Development Notes
 
 - **Database connection**: Uses ODBC Driver 17 for SQL Server (industry standard for cross-platform support)
 - **Batch processing**: Python script inserts in 1,000-row batches to balance memory and round-trip efficiency
 - **Error handling**: Script exits with code 1 on failure, code 0 on success (for scheduled task integration)
-- **Idempotent schema**: SQL script drops and recreates table, allowing safe re-execution during development
+- **Idempotent schema**: SQL scripts drop and recreate objects, allowing safe re-execution during development
+- **Idempotent loading**: MERGE procedures safe to run multiple times without creating duplicates
 - **Environment-based config**: Never hardcode credentials; always use .env variables
 - **.env is in .gitignore**: Credentials are never committed to repository
+- **Testing**: Phase 1 validation suite includes table existence, row count, FK integrity, and hierarchy checks
