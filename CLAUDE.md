@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 CTE Reporting is a SQL Server data warehouse project for Career and Technical Education (CTE) reporting. The project focuses on building dimensional models and supporting data infrastructure for the SkillStack_DW database, with emphasis on temporal analysis and regional reporting for Idaho education.
 
+#important, please work on one table and one proc at a time. Verify all columns are populating before moving on the next.
+
 ## Project Structure
 
 ```
